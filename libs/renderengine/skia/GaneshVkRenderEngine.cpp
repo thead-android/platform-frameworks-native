@@ -86,13 +86,6 @@ void GaneshVkRenderEngine::waitFenceImpl(SkiaGpuContext* context, base::borrowed
 base::unique_fd GaneshVkRenderEngine::flushAndSubmit(SkiaGpuContext* context,
                                                      sk_sp<SkSurface> dstSurface) {
     sk_sp<GrDirectContext> grContext = context->grDirectContext();
-    {
-        SFTRACE_NAME("flush surface");
-        // TODO: Investigate feasibility of combining this "surface flush" into the "context flush"
-        // below.
-        auto slice = panopticon::slice(panopticon::SliceType::CG_Skia_flush);
-        context->grDirectContext()->flush(dstSurface.get());
-    }
 
     VulkanInterface& vi = getVulkanInterface(isProtected());
     VkSemaphore semaphore = vi.createExportableSemaphore();
@@ -107,8 +100,18 @@ base::unique_fd GaneshVkRenderEngine::flushAndSubmit(SkiaGpuContext* context,
         flushInfo.fFinishedProc = unref_semaphore;
         flushInfo.fFinishedContext = destroySemaphoreInfo;
     }
+    GrSemaphoresSubmitted submitted;
+    {
+        SFTRACE_NAME("flush surface");
+        auto flushSlice = panopticon::slice(panopticon::SliceType::CG_Skia_flush);
+        // Attach the exportable semaphore to the destination surface flush
+        // itself. A separate surface flush followed by a context-only flush
+        // allowed PowerVR to signal the exported fence before the destination
+        // dma-buf writes were externally visible.
+        submitted = grContext->flush(dstSurface.get(),
+                                     SkSurfaces::BackendSurfaceAccess::kNoAccess, flushInfo);
+    }
     auto slice = panopticon::slice(panopticon::SliceType::CG_Skia_submit);
-    GrSemaphoresSubmitted submitted = grContext->flush(flushInfo);
     grContext->submit(GrSyncCpu::kNo);
     int drawFenceFd = -1;
     if (semaphore != VK_NULL_HANDLE) {
