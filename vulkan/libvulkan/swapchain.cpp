@@ -53,6 +53,28 @@ namespace driver {
 
 namespace {
 
+// The TH1520 PowerVR 1.17@6210866 driver advertises the Android native-buffer
+// interface used by modern swapchains, but its vkBindImageMemory2 path still
+// dereferences VkBindImageMemoryInfo::memory for deferred swapchain images.
+// Android intentionally passes VK_NULL_HANDLE there and supplies the gralloc
+// buffer through VkNativeBufferANDROID.  Allocate the swapchain images up front
+// for this driver so they use its working VkCreateImage native-buffer path.
+bool RequiresUpfrontSwapchainAllocation(VkDevice device) {
+    constexpr uint32_t kImaginationVendorId = 0x1010;
+    constexpr uint32_t kTh1520Bxm464DeviceId = 0x36104182;
+    constexpr uint32_t kLastBrokenDriverVersion = 6210866;
+
+    const VkPhysicalDevice physical_device =
+        GetData(device).driver_physical_device;
+    VkPhysicalDeviceProperties properties;
+    GetData(physical_device).driver.GetPhysicalDeviceProperties(
+        physical_device, &properties);
+
+    return properties.vendorID == kImaginationVendorId &&
+           properties.deviceID == kTh1520Bxm464DeviceId &&
+           properties.driverVersion <= kLastBrokenDriverVersion;
+}
+
 class VulkanLoaderSurfaceListener {
    public:
     void associatePresentId(uint64_t frameId, uint64_t presentId) {
@@ -2341,9 +2363,14 @@ VkResult CreateSwapchainKHR(VkDevice device,
     }
 
     // Note: don't do deferred allocation for shared present modes. There's only one buffer
-    // involved so very little benefit.
-    if ((create_info->flags & VK_SWAPCHAIN_CREATE_DEFERRED_MEMORY_ALLOCATION_BIT_EXT) &&
-            !IsSharedPresentMode(create_info->presentMode)) {
+    // involved so very little benefit. Some legacy Android drivers also advertise
+    // this loader feature without implementing the required native-buffer bind path.
+    const bool use_deferred_allocation =
+        (create_info->flags &
+         VK_SWAPCHAIN_CREATE_DEFERRED_MEMORY_ALLOCATION_BIT_EXT) &&
+        !IsSharedPresentMode(create_info->presentMode) &&
+        !RequiresUpfrontSwapchainAllocation(device);
+    if (use_deferred_allocation) {
         // Don't want to touch the underlying gralloc buffers yet;
         // instead just create unbound VkImages which will later be bound to memory inside
         // AcquireNextImage.
