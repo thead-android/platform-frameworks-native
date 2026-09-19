@@ -43,6 +43,7 @@
 #include <android/native_window.h>
 
 #include <android-base/strings.h>
+#include <android-base/properties.h>
 #include <gui/FenceMonitor.h>
 #include <gui/TraceUtils.h>
 #include <utils/Errors.h>
@@ -3281,6 +3282,14 @@ void Surface::destroy() {
 }
 
 bool Surface::IsCursorPlaneCompatibilitySupported() {
+    // Some legacy Vulkan drivers can allocate BGRA cursor buffers for direct
+    // scanout but cannot import them as textures (including mirrored displays).
+    // Decline that optional path for those devices: SpriteController will both
+    // convert the bitmap and allocate the surface as RGBA, rather than relabel
+    // BGRA bytes. Keep the standard cursor-plane negotiation for other stacks.
+    if (base::GetBoolProperty("debug.sf.force_rgba_cursor", false)) {
+        return false;
+    }
     const AHardwareBuffer_Desc testDesc{.width = 64,
                                         .height = 64,
                                         .layers = 1,
